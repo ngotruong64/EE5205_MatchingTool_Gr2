@@ -9,19 +9,24 @@ import threading
 # --- Cấu hình ---
 SERVER_URL = "http://127.0.0.1:8000/api/match-template/"
 PREVIEW_SIZE = (150, 150)  # Kích thước ảnh xem trước
-RESULT_SIZE = (1000, 1000)  # Kích thước tối đa của ảnh kết quả
 
 
 class TemplateMatcherApp:
     def __init__(self, root):
         """Hàm khởi tạo giao diện chính."""
         self.root = root
-        self.root.title("Template Matching Client")
+        self.root.title("Object detection with orientation")
         self.root.geometry("1000x700")
 
         # Biến lưu đường dẫn file
         self.image_path = tk.StringVar()
         self.template_path = tk.StringVar()
+
+        # Biến lưu ảnh gốc (PIL Image) và PhotoImage cho kết quả trên Canvas
+        self.current_result_image = None
+        self.result_photo = None
+        self.canvas_image_id = None
+        self.canvas_text = None
 
         # Biến cho các tham số
         self.threshold_var = tk.DoubleVar(value=0.4)
@@ -38,10 +43,10 @@ class TemplateMatcherApp:
         control_frame = ttk.Frame(self.root, padding="10")
         control_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
 
-        ttk.Label(control_frame, text="Bảng điều khiển", font=("Helvetica", 16, "bold")).pack(pady=10)
+        ttk.Label(control_frame, text="Control panel", font=("Helvetica", 16, "bold")).pack(pady=10)
 
         # --- Chọn ảnh gốc ---
-        image_frame = ttk.LabelFrame(control_frame, text="1. Chọn ảnh gốc", padding="10")
+        image_frame = ttk.LabelFrame(control_frame, text="1. Image", padding="10")
         image_frame.pack(fill=tk.X, pady=5)
 
         ttk.Button(image_frame, text="Browse Image",
@@ -51,7 +56,7 @@ class TemplateMatcherApp:
         self.image_preview_label.pack(pady=5)
 
         # --- Chọn ảnh mẫu ---
-        template_frame = ttk.LabelFrame(control_frame, text="2. Chọn ảnh mẫu (template)", padding="10")
+        template_frame = ttk.LabelFrame(control_frame, text="2. Template", padding="10")
         template_frame.pack(fill=tk.X, pady=5)
 
         ttk.Button(template_frame, text="Browse Template",
@@ -61,7 +66,7 @@ class TemplateMatcherApp:
         self.template_preview_label.pack(pady=5)
 
         # --- Cài đặt tham số ---
-        params_frame = ttk.LabelFrame(control_frame, text="3. Tùy chỉnh tham số", padding="10")
+        params_frame = ttk.LabelFrame(control_frame, text="3. Parameters", padding="10")
         params_frame.pack(fill=tk.X, pady=10)
 
         # Threshold Slider
@@ -73,32 +78,44 @@ class TemplateMatcherApp:
         self.threshold_label.pack()
 
         # Checkboxes
-        ttk.Checkbutton(params_frame, text="Sử dụng Edge-based Matching", variable=self.edge_base_var).pack(anchor=tk.W)
-        ttk.Checkbutton(params_frame, text="Kiểm tra chồng lấn (Overlap)", variable=self.check_overlap_var).pack(
+        ttk.Checkbutton(params_frame, text="Edge-based Matching", variable=self.edge_base_var).pack(anchor=tk.W)
+        ttk.Checkbutton(params_frame, text="Check overlap", variable=self.check_overlap_var).pack(
             anchor=tk.W)
 
         # --- Nút thực thi ---
-        ttk.Button(control_frame, text="RUN", command=self.start_matching_thread,
+        ttk.Button(control_frame, text="Detect", command=self.start_matching_thread,
                    style="Accent.TButton").pack(fill=tk.X, ipady=10, pady=20)
 
         # --- Thanh trạng thái ---
-        self.status_var = tk.StringVar(value="Sẵn sàng")
+        self.status_var = tk.StringVar(value="Ready")
         ttk.Label(control_frame, textvariable=self.status_var, relief=tk.SUNKEN, anchor=tk.W).pack(side=tk.BOTTOM,
                                                                                                    fill=tk.X)
 
-        # --- KHUNG KẾT QUẢ (BÊN PHẢI) ---
+        # --- KHUNG KẾT QUẢ (BÊN PHẢI) - Đã đổi sang Canvas ---
         result_frame = ttk.Frame(self.root, padding="10")
         result_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        ttk.Label(result_frame, text="Kết quả", font=("Helvetica", 16, "bold")).pack(pady=10)
+        ttk.Label(result_frame, text="Result", font=("Helvetica", 16, "bold")).pack(pady=10)
 
-        self.result_image_label = ttk.Label(result_frame, text="Kết quả sẽ hiển thị ở đây", anchor=tk.CENTER)
-        self.result_image_label.pack(fill=tk.BOTH, expand=True)
+        # Canvas để hiển thị ảnh kết quả và hỗ trợ resize/zoom
+        self.result_canvas = tk.Canvas(result_frame, bg="gray20", highlightthickness=0)
+        self.result_canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Liên kết sự kiện thay đổi kích thước cửa sổ với hàm resize
+        self.result_canvas.bind('<Configure>', self.resize_and_display_image)
+
+        # Chữ ban đầu trên canvas
+        # Cần đợi canvas được tạo xong để có kích thước, nhưng ta dùng cách này để hiển thị ngay
+        # Tọa độ 500, 500 chỉ là ước lượng ban đầu, sẽ được căn giữa khi resize lần đầu
+        self.canvas_text = self.result_canvas.create_text(
+            10, 10, text="The result will show here.", fill="white",
+            font=("Helvetica", 16), anchor=tk.NW
+        )
 
     def select_file(self, path_var, preview_label):
         """Mở hộp thoại chọn file và hiển thị ảnh xem trước."""
         file_path = filedialog.askopenfilename(
-            title="Chọn file ảnh",
+            title="Select image",
             filetypes=[("Image Files", "*.png *.jpg *.jpeg *.bmp")]
         )
         if file_path:
@@ -132,14 +149,12 @@ class TemplateMatcherApp:
             messagebox.showwarning("Thiếu thông tin", "Vui lòng chọn cả ảnh gốc và ảnh mẫu.")
             return
 
-        # Vô hiệu hóa nút để tránh click nhiều lần
-        # (Cần tìm đúng nút, ở đây đơn giản hóa bằng cách cập nhật trạng thái)
-        self.status_var.set("Đang xử lý, vui lòng chờ...")
-        self.root.update_idletasks()  # Cập nhật giao diện ngay lập tức
+        self.status_var.set("Processing, please wait...")
+        self.root.update_idletasks()
 
         # Tạo và bắt đầu thread
         thread = threading.Thread(target=self.call_api)
-        thread.daemon = True  # Thread sẽ tự tắt khi chương trình chính thoát
+        thread.daemon = True
         thread.start()
 
     def call_api(self):
@@ -148,7 +163,7 @@ class TemplateMatcherApp:
             'threshold': self.threshold_var.get(),
             'edge_base': self.edge_base_var.get(),
             'check_overlap': self.check_overlap_var.get(),
-            'return_image': True  # GUI luôn yêu cầu trả về ảnh
+            'return_image': True
         }
 
         try:
@@ -160,31 +175,86 @@ class TemplateMatcherApp:
                 }
 
                 response = requests.post(SERVER_URL, files=files, params=params, timeout=300)
-                response.raise_for_status()  # Báo lỗi nếu status code là 4xx hoặc 5xx
+                response.raise_for_status()
 
                 # Cập nhật ảnh kết quả trên main thread
                 self.root.after(0, self.display_result_image, response.content)
-                self.status_var.set("Hoàn thành!")
+                self.status_var.set("Finish!")
 
         except requests.exceptions.RequestException as e:
-            self.root.after(0, messagebox.showerror, "Lỗi API", f"Không thể kết nối hoặc server báo lỗi:\n{e}")
-            self.status_var.set("Lỗi!")
+            self.root.after(0, messagebox.showerror, "Error API", f"Cannot connect or server error:\n{e}")
+            self.status_var.set("Error!")
         except Exception as e:
-            self.root.after(0, messagebox.showerror, "Lỗi", f"Đã xảy ra lỗi không xác định:\n{e}")
-            self.status_var.set("Lỗi!")
+            self.root.after(0, messagebox.showerror, "Error", f"Unknown:\n{e}")
+            self.status_var.set("Error!")
 
     def display_result_image(self, image_bytes):
-        """Hiển thị ảnh kết quả trả về từ API."""
+        """Lưu ảnh gốc và gọi hàm hiển thị/resize."""
         try:
             img_data = io.BytesIO(image_bytes)
-            img = Image.open(img_data)
-            img.thumbnail(RESULT_SIZE)  # Thu nhỏ nếu ảnh quá lớn
-            photo = ImageTk.PhotoImage(img)
+            # Lưu trữ ảnh gốc (PIL Image)
+            self.current_result_image = Image.open(img_data)
 
-            self.result_image_label.config(image=photo)
-            self.result_image_label.image = photo
+            # Xóa chữ ban đầu trên canvas và đặt lại vị trí
+            if self.canvas_text:
+                self.result_canvas.delete(self.canvas_text)
+                self.canvas_text = None
+
+            # Hiển thị và scale ảnh theo kích thước canvas hiện tại
+            self.resize_and_display_image()
+
         except Exception as e:
             messagebox.showerror("Lỗi", f"Không thể hiển thị ảnh kết quả: {e}")
+            self.current_result_image = None
+
+    def resize_and_display_image(self, event=None):
+        """Scale ảnh kết quả để vừa với kích thước Canvas, giữ nguyên tỉ lệ."""
+        if not self.current_result_image:
+            # Nếu chưa có ảnh, căn giữa lại text nếu nó đang hiển thị
+            if self.canvas_text:
+                canvas_width = self.result_canvas.winfo_width()
+                canvas_height = self.result_canvas.winfo_height()
+                self.result_canvas.coords(self.canvas_text, canvas_width // 2, canvas_height // 2)
+                self.result_canvas.itemconfig(self.canvas_text, anchor=tk.CENTER)
+            return
+
+        canvas_width = self.result_canvas.winfo_width()
+        canvas_height = self.result_canvas.winfo_height()
+
+        if canvas_width <= 1 or canvas_height <= 1:
+            return
+
+        original_width, original_height = self.current_result_image.size
+
+        # Tính toán tỉ lệ scale để fit vào canvas
+        ratio_w = canvas_width / original_width
+        ratio_h = canvas_height / original_height
+
+        # Chọn tỉ lệ nhỏ hơn để đảm bảo ảnh vừa vặn hoàn toàn
+        scale_ratio = min(ratio_w, ratio_h)
+
+        # Tính kích thước mới
+        new_width = int(original_width * scale_ratio)
+        new_height = int(original_height * scale_ratio)
+
+        # Resize ảnh
+        resized_img = self.current_result_image.resize((new_width, new_height))
+
+        # Tạo PhotoImage mới và giữ tham chiếu
+        self.result_photo = ImageTk.PhotoImage(resized_img)
+
+        # Xóa ảnh cũ trên canvas (nếu có)
+        if self.canvas_image_id:
+            self.result_canvas.delete(self.canvas_image_id)
+
+        # Hiển thị ảnh mới ở trung tâm canvas
+        x = canvas_width // 2
+        y = canvas_height // 2
+
+        self.canvas_image_id = self.result_canvas.create_image(x, y, image=self.result_photo)
+
+        # Đảm bảo ảnh mới được hiển thị phía dưới các layer khác (nếu có)
+        self.result_canvas.tag_lower(self.canvas_image_id)
 
 
 if __name__ == "__main__":
@@ -192,7 +262,9 @@ if __name__ == "__main__":
 
     # Sử dụng style để nút bấm trông đẹp hơn (tùy chọn)
     style = ttk.Style(root)
-    style.configure("Accent.TButton", foreground="white", background="dodgerblue", font=("Helvetica", 12, "bold"))
+    style.configure("Accent.TButton", foreground="green", background="#2a6e9a", font=("Helvetica", 12, "bold"))
+    style.map("Accent.TButton", background=[('active', '#3c90c7')])
+    style.configure("TLabel", padding=2)
 
     app = TemplateMatcherApp(root)
     root.mainloop()

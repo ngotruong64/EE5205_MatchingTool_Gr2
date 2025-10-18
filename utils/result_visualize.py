@@ -86,8 +86,9 @@ def visualize_detection_results(
         # FIX 2: Loại bỏ ký tự độ (°) để tránh lỗi font và cast angle sang int
         label = f"S:{score:.2f} A:{int(angle)}"
         if overlapped:
-            label = f"⚠️ {label}"
+            label = f"{label}"
 
+        # Tính vị trí text (trên điểm gốc)
         # Tính vị trí text (trên điểm gốc)
         text_size = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)[0]
         text_x = int(x)
