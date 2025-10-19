@@ -5,6 +5,7 @@ from functools import partial
 from shapely.geometry import Polygon
 from shapely.affinity import rotate, scale
 from utils.InvariantTM import invariant_match_template, auto_canny
+from utils.result_visualize import *
 import logging
 
 # Cấu hình mặc định với các giá trị gán cứng từ code test
@@ -129,11 +130,15 @@ def process_roi(roi_info: tuple, img: np.ndarray, template: np.ndarray, threshol
         adjusted_points.append((adjusted_point, point_info[1], point_info[2], point_info[3]))
     return adjusted_points
 
-def process_template_matching(image_bytes: bytes,
-                             template_bytes: bytes,
-                             threshold: float = 0.4,
-                             edge_base: bool = True,
-                             check_overlap: bool = False) -> dict:
+# Trong services/template_matching_service.py
+def process_template_matching(
+    image_bytes: bytes,
+    template_bytes: bytes,
+    threshold: float = 0.4,
+    edge_base: bool = True,
+    check_overlap: bool = False,
+    include_image: bool = False
+) -> tuple[dict, np.ndarray | None]:
     """
     Perform invariant template matching with preprocessing, ROI extraction, and parallel processing.
     Returns matches with an additional 'overlapped' field indicating if the match's bounding box overlaps with others,
@@ -145,9 +150,10 @@ def process_template_matching(image_bytes: bytes,
         threshold (float): Ngưỡng khớp mẫu.
         edge_base (bool): Sử dụng ảnh biên nếu True, ảnh grayscale nếu False.
         check_overlap (bool): Kiểm tra chồng lấn giữa các hình chữ nhật chính nếu True.
+        include_image (bool): Trả về ảnh gốc nếu True.
 
     Returns:
-        dict: Kết quả với số lượng matches và danh sách matches, mỗi match có trường overlapped.
+        tuple: (dict with results, original_img or None)
     """
     # Chuyển bytes thành mảng NumPy
     image_array = np.frombuffer(image_bytes, np.uint8)
@@ -191,7 +197,7 @@ def process_template_matching(image_bytes: bytes,
     # Tìm ROIs
     rois = find_rois_threshold(img, edges, template_gray.shape, CONFIG)
 
-    # Xử lý từng ROI (tạm thời bỏ song song hóa để đơn giản hóa)
+    # Xử lý từng ROI
     all_points_list = []
     for roi in rois:
         points = process_roi(roi, img, temp, threshold)
@@ -203,82 +209,52 @@ def process_template_matching(image_bytes: bytes,
     for point_info in all_points_list:
         point = point_info[0]
         angle = point_info[1]
-        scale_factor = point_info[2] / 100  # Chuyển từ phần trăm sang tỷ lệ
+        scale_factor = point_info[2] / 100
         score = point_info[3]
 
-        # Tính toán tọa độ 4 góc của hình chữ nhật
         w_scaled = width * scale_factor
         h_scaled = height * scale_factor
         center_x = point[0] + w_scaled / 2
         center_y = point[1] + h_scaled / 2
 
-        # Tạo Polygon cho hình chữ nhật
         rect_points = [
-            (point[0], point[1]),  # Góc trên trái
-            (point[0] + w_scaled, point[1]),  # Góc trên phải
-            (point[0] + w_scaled, point[1] + h_scaled),  # Góc dưới phải
-            (point[0], point[1] + h_scaled)  # Góc dưới trái
+            (point[0], point[1]),
+            (point[0] + w_scaled, point[1]),
+            (point[0] + w_scaled, point[1] + h_scaled),
+            (point[0], point[1] + h_scaled)
         ]
         poly = Polygon(rect_points)
-        # poly = scale(poly, xfact=1, yfact=1, origin=(point[0], point[1]))
         poly = rotate(poly, angle, origin=(center_x, center_y), use_radians=False)
         rectangles.append((poly, point, angle, scale_factor, score))
 
-        # Kiểm tra chồng lấn giữa các hình chữ nhật chính (nếu check_overlap=True)
-        overlapping = set()
-        if check_overlap:
-            height, width = template_gray.shape
-            rectangles = []
-            for point_info in all_points_list:
-                point = point_info[0]
-                angle = point_info[1]
-                scale_factor = point_info[2] / 100  # Chuyển từ phần trăm sang tỷ lệ
-                score = point_info[3]
+    overlapping = set()
+    if check_overlap:
+        for i, (poly1, _, _, _, _) in enumerate(rectangles):
+            for j, (poly2, _, _, _, _) in enumerate(rectangles):
+                if i < j and poly1.intersects(poly2) and not poly1.touches(poly2):
+                    overlapping.add(i)
+                    overlapping.add(j)
 
-                # Tính toán tọa độ 4 góc của hình chữ nhật
-                w_scaled = width * scale_factor
-                h_scaled = height * scale_factor
-                center_x = point[0] + w_scaled / 2
-                center_y = point[1] + h_scaled / 2
-
-                # Tạo Polygon cho hình chữ nhật
-                rect_points = [
-                    (point[0], point[1]),  # Góc trên trái
-                    (point[0] + w_scaled, point[1]),  # Góc trên phải
-                    (point[0] + w_scaled, point[1] + h_scaled),  # Góc dưới phải
-                    (point[0], point[1] + h_scaled)  # Góc dưới trái
-                ]
-                poly = Polygon(rect_points)
-                # poly = scale(poly, xfact=1, yfact=1, origin=(point[0], point[1]))
-                poly = rotate(poly, angle, origin=(center_x, center_y), use_radians=False)
-                rectangles.append((poly, point, angle, scale_factor, score))
-
-            # Kiểm tra chồng lấn
-            for i, (poly1, _, _, _, _) in enumerate(rectangles):
-                for j, (poly2, _, _, _, _) in enumerate(rectangles):
-                    if i < j and poly1.intersects(poly2) and not poly1.touches(poly2):
-                        overlapping.add(i)
-                        overlapping.add(j)
-
-        # Chuẩn bị kết quả trả về
-        matches = []
-        for i, point_info in enumerate(all_points_list):
-            point, angle, scale, score = point_info
-            match_info = {
-                "x": int(point[0]),
-                "y": int(point[1]),
-                "angle": float(angle),
-                "scale": float(scale),
-                "score": round(float(score), 3),
-                "overlapped": i in overlapping if check_overlap else False  # Thêm trường overlapped
-            }
-            matches.append(match_info)
-
-        result = {
-            "count": len(matches),
-            "matches": matches
+    # Chuẩn bị kết quả trả về
+    matches = []
+    for i, point_info in enumerate(all_points_list):
+        point, angle, scale, score = point_info
+        match_info = {
+            "x": int(point[0]),
+            "y": int(point[1]),
+            "angle": float(angle),
+            "scale": float(scale),
+            "score": round(float(score), 3),
+            "overlapped": i in overlapping if check_overlap else False
         }
+        matches.append(match_info)
 
-        logging.info(f"Số lượng matches: {len(matches)}")
-        return result
+    results = {
+        "count": len(matches),
+        "matches": matches,
+        "image_shape": list(img_bgr.shape[:2]),
+        "template_shape": list(template_gray.shape)
+    }
 
+    logging.info(f"Số lượng matches: {len(matches)}")
+    return results, img_bgr if include_image else None
