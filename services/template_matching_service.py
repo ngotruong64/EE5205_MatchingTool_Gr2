@@ -58,8 +58,14 @@ def find_rois_threshold(image: np.ndarray, edges: np.ndarray, template_shape: tu
         # Nền tối: Lấy đối tượng sáng
         _, binary_mask = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
+    # binary_mask = cv2.adaptiveThreshold(
+    #     blurred, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+    #     cv2.THRESH_BINARY_INV, 55, 10
+    # )
+
     # Đóng các vùng đứt để cải thiện contours
     kernel = np.ones((3, 3), np.uint8)
+
     binary_mask = cv2.morphologyEx(binary_mask, cv2.MORPH_CLOSE, kernel, iterations=1)
 
     # Tìm contours trong mask nhị phân
@@ -83,10 +89,62 @@ def find_rois_threshold(image: np.ndarray, edges: np.ndarray, template_shape: tu
                     rois.append((top_left, bottom_right))
 
     logging.info(f"Tìm thấy {len(rois)} ROIs. Using threshold")
+    if 'show_rois_matplotlib' in globals():
+        show_rois_matplotlib(image, rois)
     return rois
+
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib.patches as patches
+    def show_rois_matplotlib(image: np.ndarray, rois: list, title="ROIs (threshold)"):
+        """
+        Hiển thị ảnh và vẽ các ROI bằng matplotlib.
+        image: grayscale hoặc BGR
+        rois: [((x1,y1),(x2,y2)), ...]
+        """
+        fig, ax = plt.subplots(1, figsize=(8, 8))
+
+        # Hiển thị ảnh
+        if image.ndim == 2:
+            ax.imshow(image, cmap="gray")
+        else:
+            ax.imshow(image[..., ::-1])  # BGR → RGB
+
+        # Vẽ ROI
+        for i, (tl, br) in enumerate(rois):
+            x1, y1 = tl
+            x2, y2 = br
+            w, h = x2 - x1, y2 - y1
+
+            rect = patches.Rectangle(
+                (x1, y1), w, h,
+                linewidth=2,
+                edgecolor='lime',
+                facecolor='none'
+            )
+            ax.add_patch(rect)
+
+            ax.text(
+                x1, y1 - 3,
+                f"{i}: {w}x{h}",
+                color='lime',
+                fontsize=8,
+                bbox=dict(facecolor='black', alpha=0.4, pad=1)
+            )
+
+        ax.set_title(f"{title} | count = {len(rois)}")
+        ax.axis("off")
+        plt.tight_layout()
+        plt.show()
+    plt.show()
+except ImportError:
+    pass
+
+import time
 
 def process_roi(roi_info: tuple, img: np.ndarray, template: np.ndarray, threshold: float) -> list:
     """Xử lý template matching cho một ROI."""
+    t0 = time.time()
     top_left, bottom_right = roi_info
     x1, y1 = top_left
     x2, y2 = bottom_right
@@ -128,7 +186,10 @@ def process_roi(roi_info: tuple, img: np.ndarray, template: np.ndarray, threshol
         point = point_info[0]
         adjusted_point = (point[0] + x1, point[1] + y1)
         adjusted_points.append((adjusted_point, point_info[1], point_info[2], point_info[3]))
-    return adjusted_points
+    
+    duration = time.time() - t0
+    # print(f"ROI {roi_info} processed in {duration:.4f}s")
+    return adjusted_points, duration
 
 # Trong services/template_matching_service.py
 def process_template_matching(
@@ -199,9 +260,11 @@ def process_template_matching(
 
     # Xử lý từng ROI
     all_points_list = []
+    roi_times = []
     for roi in rois:
-        points = process_roi(roi, img, temp, threshold)
+        points, roi_duration = process_roi(roi, img, temp, threshold)
         all_points_list.extend(points)
+        roi_times.append(roi_duration)
 
     # Kiểm tra chồng lấn giữa các hình chữ nhật chính
     height, width = template_gray.shape
@@ -252,6 +315,7 @@ def process_template_matching(
     results = {
         "count": len(matches),
         "matches": matches,
+        "roi_times": roi_times,
         "image_shape": list(img_bgr.shape[:2]),
         "template_shape": list(template_gray.shape)
     }
